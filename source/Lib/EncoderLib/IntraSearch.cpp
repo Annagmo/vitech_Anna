@@ -3,7 +3,7 @@
  * and contributor rights, including patent rights, and no such rights are
  * granted under this license.
  *
- * Copyright (c) 2010-2022, ITU/ISO/IEC
+ * Copyright (c) 2010-2021, ITU/ISO/IEC
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -521,7 +521,7 @@ bool IntraSearch::isValidIntraPredChroma(PredictionUnit &pu, int luma_dirMode, i
 }
 #endif
 
-bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, const double bestCostSoFar, bool mtsCheckRangeFlag, int mtsFirstCheckId, int mtsLastCheckId, bool moreProbMTSIdxFirst, CodingStructure* bestCS)
+bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, bool *predicted, double *feature, int *classe, double *tempo, const double bestCostSoFar, bool mtsCheckRangeFlag, int mtsFirstCheckId, int mtsLastCheckId, bool moreProbMTSIdxFirst, CodingStructure* bestCS)
 {
   CodingStructure       &cs            = *cu.cs;
   const SPS             &sps           = *cs.sps;
@@ -545,13 +545,16 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
   bool LFNSTLoadFlag = sps.getUseLFNST() && cu.lfnstIdx != 0;
   bool LFNSTSaveFlag = sps.getUseLFNST() && cu.lfnstIdx == 0;
 
-  LFNSTSaveFlag &= sps.getExplicitMtsIntraEnabled() ? cu.mtsFlag == 0 : true;
+  LFNSTSaveFlag &= sps.getUseIntraMTS() ? cu.mtsFlag == 0 : true;
 
   const uint32_t lfnstIdx = cu.lfnstIdx;
   double costInterCU = findInterCUCost( cu );
 
   const int width  = partitioner.currArea().lwidth();
   const int height = partitioner.currArea().lheight();
+  //Anna:
+  const double div = (double)(width * height);
+  bool copiarLista = false;
 
   // Marking MTS usage for faster MTS
   // 0: MTS is either not applicable for current CU (cuWidth > MTS_INTRA_MAX_CU_SIZE or cuHeight > MTS_INTRA_MAX_CU_SIZE), not active in the config file or the fast decision algorithm is not used in this case
@@ -559,7 +562,7 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
   // 2: MTS is being checked for current CU. Stored results of DCT2 can be utilized for speedup
   uint8_t mtsUsageFlag = 0;
   const int maxSizeEMT = MTS_INTRA_MAX_CU_SIZE;
-  if (width <= maxSizeEMT && height <= maxSizeEMT && sps.getExplicitMtsIntraEnabled())
+  if( width <= maxSizeEMT && height <= maxSizeEMT && sps.getUseIntraMTS() )
   {
     mtsUsageFlag = ( sps.getUseLFNST() && cu.mtsFlag == 1 ) ? 2 : 1;
   }
@@ -607,7 +610,7 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
 
   auto &pu = *cu.firstPU;
 #if GDR_ENABLED
-  const bool isEncodeGdrClean = cs.sps->getGDREnabledFlag() && cs.pcv->isEncoder && cs.picHeader->getInGdrInterval() && cs.isClean(pu.Y().topRight(), CHANNEL_TYPE_LUMA);
+  const bool isEncodeGdrClean = cs.sps->getGDREnabledFlag() && cs.pcv->isEncoder && ((cs.picHeader->getInGdrInterval() && cs.isClean(pu.Y().topRight(), CHANNEL_TYPE_LUMA)) || (cs.picHeader->getNumVerVirtualBoundaries() == 0));
 #endif
   bool validReturn = false;
   {
@@ -710,7 +713,8 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
           {
             for (int modeIdx = 0; modeIdx < numModesAvailable; modeIdx++)
             {
-              uint32_t   mode      = modeIdx;
+				//Anna:
+              uint32_t  mode      = modeIdx;
               Distortion minSadHad = 0;
 
               // Skip checking extended Angular modes in the first round of SATD
@@ -727,7 +731,10 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
               predIntraAng(COMPONENT_Y, piPred, pu);
               // Use the min between SAD and HAD as the cost criterion
               // SAD is scaled by 2 to align with the scaling of HAD
-              minSadHad += std::min(distParamSad.distFunc(distParamSad) * 2, distParamHad.distFunc(distParamHad));
+              // Anna: 
+              Distortion soma_dif_abs   = distParamSad.distFunc(distParamSad) * 2;
+              Distortion soma_dif_abs_t = distParamHad.distFunc(distParamHad);
+              minSadHad += std::min(soma_dif_abs, soma_dif_abs_t);
 
               // NB xFracModeBitsIntra will not affect the mode for chroma that may have already been pre-estimated.
               m_CABACEstimator->getCtx() = SubCtx( Ctx::MipFlag, ctxStartMipFlag );
@@ -736,11 +743,14 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
               m_CABACEstimator->getCtx() = SubCtx(Ctx::IntraLumaMpmFlag, ctxStartIntraMode);
               m_CABACEstimator->getCtx() = SubCtx( Ctx::MultiRefLineIdx, ctxStartMrlIdx );
 
+
               uint64_t fracModeBits = xFracModeBitsIntra(pu, mode, CHANNEL_TYPE_LUMA);
 
               double cost = (double) minSadHad + (double) fracModeBits * sqrtLambdaForFirstPass;
+  
+			  
+			  DTRACE(g_trace_ctx, D_INTRA_COST, "IntraHAD: %u, %llu, %f (%d)\n", minSadHad, fracModeBits, cost, mode);
 
-              DTRACE(g_trace_ctx, D_INTRA_COST, "IntraHAD: %u, %llu, %f (%d)\n", minSadHad, fracModeBits, cost, mode);
 
 #if GDR_ENABLED
               if (isEncodeGdrClean)
@@ -766,6 +776,42 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
               updateCandList(ModeInfo(false, false, 0, NOT_INTRA_SUBPARTITIONS, mode), double(minSadHad), hadModeList,
                              candHadList, numHadCand);
 #endif
+              
+              
+               //Anna:
+                  
+                  if (modeIdx == 0) //Planar
+                  { 
+                            
+                    feature[9] = cost/div;
+                    //feature[10] = multiRefIdx;
+                    feature[6] = soma_dif_abs/div;              //feature[6] - sadPlanar
+                    feature[7] = soma_dif_abs_t/div;            //feature[7] - sadtPlanar
+                    feature[8] = fracModeBits/div;              //feature[8] - fracPlanar
+              
+				          }
+                   else if(mode==1 && feature[14] > cost/div) //DC
+                  {
+           
+                    //feature[10] = multiRefIdx;
+                    feature[14] = cost/div;
+                    feature[11] = soma_dif_abs/div;              //feature[11] - sadDC
+                    feature[12] = soma_dif_abs_t/div;            //feature[12] - sadtDC
+                    feature[13] = fracModeBits/div;              //feature[13] - fracDC
+                  }
+                  else if(mode>1 && feature[20] > cost/div) //ang
+                  {
+               
+                    //feature[15] = multiRefIdx; 
+                    feature[16] = mode; 
+                    feature[20] = cost/div;
+                    feature[17] = soma_dif_abs/div;              //feature[17] - sadAng
+                    feature[18] = soma_dif_abs_t/div;            //feature[18] - sadtAng
+                    feature[19] = fracModeBits/div;              //feature[19] - fracAng 
+                  }
+              
+                  
+            
             }
             if (!sps.getUseMIP() && LFNSTSaveFlag)
             {
@@ -823,8 +869,10 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
 
                     // Use the min between SAD and SATD as the cost criterion
                     // SAD is scaled by 2 to align with the scaling of HAD
-                    Distortion minSadHad =
-                      std::min(distParamSad.distFunc(distParamSad) * 2, distParamHad.distFunc(distParamHad));
+                    //Anna:
+                    Distortion soma_dif_abs   = distParamSad.distFunc(distParamSad) * 2;
+                    Distortion soma_dif_abs_t = distParamHad.distFunc(distParamHad);
+                    Distortion minSadHad = std::min(soma_dif_abs, soma_dif_abs_t);
 
                     // NB xFracModeBitsIntra will not affect the mode for chroma that may have already been
                     // pre-estimated.
@@ -837,6 +885,26 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
                     uint64_t fracModeBits = xFracModeBitsIntra(pu, mode, CHANNEL_TYPE_LUMA);
 
                     double cost = (double) minSadHad + (double) fracModeBits * sqrtLambdaForFirstPass;
+                    
+              
+              //Anna:
+                  
+              //Segunda rodada RMD:
+              if(feature[20]>cost/div)
+              {
+               
+                //feature[15] = multiRefIdx; 
+                feature[16] = modeIdx; 
+                feature[20] = cost/div;
+                feature[17] = soma_dif_abs;              //feature[17] - sadAng
+                feature[18] = soma_dif_abs_t;            //feature[18] - sadtAng
+                feature[19] = fracModeBits;              //feature[19] - fracAng 
+              }
+              
+              
+              
+              
+              
 
 #if GDR_ENABLED
                     if (isEncodeGdrClean)
@@ -864,9 +932,21 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
 #endif
 
                     satdChecked[mode] = true;
+                    
+                   /* //Anna:
+                    
+                     if (feature[20] > cost/div)
+                      feature[20] = cost/div;
+                    //bsatd
+                    satdChecked[mode] = true;
+                    feature[15] = 0; //MRL = 0 nos angulares ao lado dos melhores
+                    feature[16] = modeIdx; //atualizando feature[16] 
+                    feature[17] = soma_dif_abs;            //atualizando feature[17] - sadAng 
+                    feature[18] = soma_dif_abs_t;           //atualizando feature[18] - sadtAng  
+                    feature[19] = fracModeBits;              //feature[19] - fracAng */
                   }
                 }
-              }
+              }     
             }
             if (saveDataForISP)
             {
@@ -896,8 +976,11 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
 
                   // Use the min between SAD and SATD as the cost criterion
                   // SAD is scaled by 2 to align with the scaling of HAD
+                  
+                  Distortion soma_dif_abs = distParamSad.distFunc(distParamSad) * 2;
+                  Distortion soma_dif_abs_t = distParamHad.distFunc(distParamHad);
                   Distortion minSadHad =
-                    std::min(distParamSad.distFunc(distParamSad) * 2, distParamHad.distFunc(distParamHad));
+                    std::min(soma_dif_abs, soma_dif_abs_t);
 
                   // NB xFracModeBitsIntra will not affect the mode for chroma that may have already been pre-estimated.
                   m_CABACEstimator->getCtx() = SubCtx(Ctx::MipFlag, ctxStartMipFlag);
@@ -909,6 +992,28 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
                   uint64_t fracModeBits = xFracModeBitsIntra(pu, mode, CHANNEL_TYPE_LUMA);
 
                   double cost = (double) minSadHad + (double) fracModeBits * sqrtLambdaForFirstPass;
+                  
+                  //Anna:
+                  
+                   if(mode==1 && feature[14] > cost/div) //DC
+                  {
+           
+                    feature[10] = multiRefIdx;
+                    feature[14] = cost/div;
+                    feature[11] = soma_dif_abs/div;              //feature[11] - sadDC
+                    feature[12] = soma_dif_abs_t/div;            //feature[12] - sadtDC
+                    feature[13] = fracModeBits/div;              //feature[13] - fracDC
+                  }
+                  else if(mode>1 && feature[20] > cost/div) //ang
+                  {
+               
+                    feature[15] = multiRefIdx; 
+                    feature[16] = mode; 
+                    feature[20] = cost;
+                    feature[17] = soma_dif_abs/div;              //feature[17] - sadAng
+                    feature[18] = soma_dif_abs_t/div;            //feature[18] - sadtAng
+                    feature[19] = fracModeBits/div;              //feature[19] - fracAng 
+                  }
 #if GDR_ENABLED
                   if (isEncodeGdrClean)
                   {
@@ -1001,9 +1106,12 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
 
                 // Use the min between SAD and HAD as the cost criterion
                 // SAD is scaled by 2 to align with the scaling of HAD
+                //Anna:
+                Distortion soma_dif_abs   = distParamSad.distFunc(distParamSad) * 2; 
+                Distortion soma_dif_abs_t = distParamHad.distFunc(distParamHad);
                 Distortion minSadHad =
-                  std::min(distParamSad.distFunc(distParamSad) * 2, distParamHad.distFunc(distParamHad));
-
+                  std::min(soma_dif_abs, soma_dif_abs_t);
+                  
                 m_CABACEstimator->getCtx() = SubCtx(Ctx::MipFlag, ctxStartMipFlag);
 
                 uint64_t fracModeBits = xFracModeBitsIntra(pu, mode, CHANNEL_TYPE_LUMA);
@@ -1012,6 +1120,23 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
                 mipHadCost[uiModeFull] = cost;
                 DTRACE(g_trace_ctx, D_INTRA_COST, "IntraMIP: %u, %llu, %f (%d)\n", minSadHad, fracModeBits, cost,
                        uiModeFull);
+                       
+                //Anna:
+                
+                if (feature[26] > cost/div) //mip
+                {
+                  feature[21] = (double) isTransposed; //feature[21] - mipT
+                  /*feature[22] = (double) uiMode+1*/
+                  //feature[20] = (double) uiMode;
+                  feature[22] = (double) mode+1;
+                  feature[26] = cost/div;
+                  feature[23] = soma_dif_abs/div;              //feature[23] - sadMip
+                  feature[24] = soma_dif_abs_t/div;            //ffeature[24] - sadtMip
+                  feature[25] = fracModeBits/div;              //feature[25] - fracMip
+                }
+                
+               
+              
 
 #if GDR_ENABLED
                 if (isEncodeGdrClean)
@@ -1052,8 +1177,8 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
               m_savedHadModeListLFNST   = hadModeList;
               m_savedHadListLFNST       = candHadList;
               LFNSTSaveFlag             = false;
-            }
-          }
+				}
+		  }
           else   // if( sps.getUseMIP() && LFNSTLoadFlag)
           {
             // restore saved modes
@@ -1138,19 +1263,21 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
                   m_ispCandListHor.push_back(mostProbableMode);
                 }
 #endif
+                }
               }
             }
-          }
-        }
+		  }
         else
         {
           THROW("Full search not supported for MIP");
         }
         if (sps.getUseLFNST() && mtsUsageFlag == 1)
         {
+			//Anna:
+			copiarLista = true;
           // Store the modes to be checked with RD
-          m_savedNumRdModes[lfnstIdx] = numModesForFullRD;
-          std::copy_n(rdModeList.begin(), numModesForFullRD, m_savedRdModeList[lfnstIdx]);
+         /* m_savedNumRdModes[lfnstIdx] = numModesForFullRD;
+          std::copy_n(rdModeList.begin(), numModesForFullRD, m_savedRdModeList[lfnstIdx]);*/
         }
       }
       else   // mtsUsage = 2 (here we potentially reduce the number of modes that will be full-RD checked)
@@ -1249,8 +1376,115 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
         }
       }
     }
+    
+    //Anna:
+    bool  encontrou_angular = false, encontrou_mip = false, encontrou_dc =  false;
+    
+    if(*predicted)
+    {
+      /*Dentro deste if, tu testa as condições em que os modos são removidos
+      da mesma forma que fez no caso de ainda não ter sido predito.
+      Neste caso aqui tu já tem a classe, então não tem a parte do modelo,
+      mas tem a parte do for que percorre a lista de modos e remove
+      o modo caso ele deva ser removido de acordo com a tua classe.
+      Algo como:*/
+      for (int mode = 0; mode < (int) rdModeList.size(); mode++)
+      {
+        bool eh_mip = rdModeList[mode].mipFlg;
+        bool eh_angular = rdModeList[mode].modeId > 1;
+        if ((*classe == 0 && (eh_mip || eh_angular)) || (*classe == 1 && eh_mip) || (*classe == 2 && !eh_mip && eh_angular))
+        {
+          rdModeList.erase(rdModeList.begin() + mode);
+          mode -= 1;
+        }
+      }
+    }
+    /*
+    Lembrando que é feito desta forma porque o bloco irá entrar aqui mais de uma vez:
+    1º: no caso da primeira transformada (DCT), que a variável predicted será falsa e portanto
+    tu irá rodar ao modelo para predizer a classe e depois remover os modos.
+
+    2º: no caso das demas transfromadas, que a variável predicted será true e tu não quer rodar
+    o modelo de novo, mas quer remover os modos da lista de acordo com a classe que já foi predita
+    */
+    else if(!(*predicted))
+    {
+      for (int mode = 0; mode < (int)rdModeList.size(); mode++)
+      {
+        if(!rdModeList[mode].mipFlg)
+        {
+          if(rdModeList[mode].modeId == 0) //planar
+          {
+            feature[27] = (double) mode + 1; //posição do primeiro modo planar   feature[27] - posRdListPlanar 
+          }
+          else if(rdModeList[mode].modeId == 1) //DC
+          {
+            if(!encontrou_dc)
+            {
+              feature[28] = (double) mode + 1; //posição do primeiro modo dc   feature[28] - posRdListDC
+              encontrou_dc = true;
+            }
+          }
+          else if (!encontrou_angular)
+          {
+              encontrou_angular = true;
+              feature[29] = (double) mode + 1;    //posição do primeiro modo Angular  feature[29] - posRdListAng
+              feature[30] = (double) rdModeList[mode].modeId;   //qual o modo: feature[30] - modoAngRDList
+          }
+        }
+        else
+        {
+          if (!encontrou_mip)
+          {
+            encontrou_mip = true;
+            feature[31] = (double) mode+1; //posição do primeiro modo MIP  feature[31] - posRdListMip
+            feature[32] = (double) rdModeList[mode].modeId+1; //qual o modo: feature[32] - modoMipRDList
+          }
+        }
+      }
+      
+    
+	//Arredondamento SAD, SADT e FracBits.
+    feature[6] = ((int)((100.*(feature[6]))+.5))/100.;               //feature[6] - sadPlanar
+    feature[7] = ((int)((100.*(feature[7]))+.5))/100.;             //feature[7] - sadtPlanar
+    feature[8] = ((int)((100.*(feature[8]))+.5))/100.;               //feature[8] - fracPlanar
+    feature[11] = ((int)((100.*(feature[11]))+.5))/100.;              //feature[11] - sadDC
+    feature[12] = ((int)((100.*(feature[12]))+.5))/100.;            //feature[12] - sadtDC
+    feature[13] = ((int)((100.*(feature[13]))+.5))/100.;              //feature[13] - fracDC
+    feature[17] = ((int)((100.*(feature[17]))+.5))/100.;              //feature[17] - sadAng
+    feature[18] = ((int)((100.*(feature[18]))+.5))/100.;            //feature[18] - sadtAng
+    feature[19] = ((int)((100.*(feature[19]))+.5))/100.;              //feature[19] - fracAng 
+    feature[23] = ((int)((100.*(feature[23]))+.5))/100.;              //feature[23] - sadMip
+    feature[24] = ((int)((100.*(feature[24]))+.5))/100.;            //feature[24] - sadtMip
+    feature[25] = ((int)((100.*(feature[25]))+.5))/100.;              //feature[25] - fracMip
+
+    feature[9] = ((int) ((100. * (feature[9])) + .5)) / 100.; //planar
+    feature[14] = ((int) ((100. * (feature[14])) + .5)) / 100.; //dc
+    feature[20] = ((int) ((100. * (feature[20])) + .5)) / 100.; //angular
+    feature[26] = ((int) ((100. * (feature[26])) + .5)) / 100.; //mip
+    
+   
+    clock_t t_start_modelo = clock();
+    *classe = modelo_anna(feature);
+    *predicted = true;
+    *tempo += (double) (clock() - t_start_modelo) / CLOCKS_PER_SEC;
+
+    for (int mode = 0; mode < (int) rdModeList.size(); mode++)
+    {
+      bool eh_mip = rdModeList[mode].mipFlg;
+      bool eh_angular = rdModeList[mode].modeId > 1;
+      if ((*classe == 0 && (eh_mip || eh_angular)) || (*classe == 1 && eh_mip) || (*classe == 2 && !eh_mip && eh_angular))
+      {
+        rdModeList.erase(rdModeList.begin() + mode);
+        mode -= 1;
+      }
+    }
+
+
+   }
 
     int numNonISPModes = (int) rdModeList.size();
+   
 
     if ( testISP )
     {
@@ -1485,6 +1719,12 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
     } // Mode loop
     cu.ispMode = uiBestPUMode.ispMod;
     cu.lfnstIdx = bestLfnstIdx;
+    //Anna:
+    if(copiarLista)
+    {
+      m_savedNumRdModes[lfnstIdx] = numNonISPModes;
+      std::copy_n(rdModeList.begin(), numNonISPModes, m_savedRdModeList[lfnstIdx]);
+    }
 
     if( validReturn )
     {
@@ -1518,7 +1758,7 @@ bool IntraSearch::estIntraPredLumaQT(CodingUnit &cu, Partitioner &partitioner, c
   m_CABACEstimator->getCtx() = ctxStart;
 
   return validReturn;
-}
+  }
 
 void IntraSearch::estIntraPredChromaQT( CodingUnit &cu, Partitioner &partitioner, const double maxCostAllowed )
 {
@@ -1630,7 +1870,7 @@ void IntraSearch::estIntraPredChromaQT( CodingUnit &cu, Partitioner &partitioner
       {
         int mode = chromaCandModes[idx];
         satdModeList[idx] = mode;
-        if (PU::isLMCMode(mode) && (!PU::isLMCModeEnabled(pu, mode) || cu.slice->getDisableLmChromaCheck()))
+        if (PU::isLMCMode(mode) && !PU::isLMCModeEnabled(pu, mode))
         {
           continue;
         }
@@ -1731,7 +1971,7 @@ void IntraSearch::estIntraPredChromaQT( CodingUnit &cu, Partitioner &partitioner
           chromaIntraMode = chromaCandModes[mode];
 
           cu.bdpcmModeChroma = 0;
-          if( PU::isLMCMode( chromaIntraMode ) && ( !PU::isLMCModeEnabled( pu, chromaIntraMode ) || cu.slice->getDisableLmChromaCheck() ) )
+          if( PU::isLMCMode( chromaIntraMode ) && ! PU::isLMCModeEnabled( pu, chromaIntraMode ) )
           {
             continue;
           }
@@ -1760,8 +2000,8 @@ void IntraSearch::estIntraPredChromaQT( CodingUnit &cu, Partitioner &partitioner
         }
 
         uint64_t fracBits   = xGetIntraFracBitsQT( cs, partitioner, false, true, -1, ispType );
-        Distortion dist       = cs.dist;
-        double     dCost      = m_pcRdCost->calcRdCost(fracBits, dist - baseDist);
+        Distortion uiDist = cs.dist;
+        double    dCost   = m_pcRdCost->calcRdCost( fracBits, uiDist - baseDist );
 
         //----- compare -----
 #if GDR_ENABLED
@@ -1800,7 +2040,7 @@ void IntraSearch::estIntraPredChromaQT( CodingUnit &cu, Partitioner &partitioner
           }
 
           dBestCost  = dCost;
-          uiBestDist    = dist;
+          uiBestDist = uiDist;
           uiBestMode = chromaIntraMode;
           bestBDPCMMode = cu.bdpcmModeChroma;
         }
@@ -3312,9 +3552,7 @@ uint64_t IntraSearch::xGetIntraFracBitsQTChroma(TransformUnit& currTU, const Com
   return fracBits;
 }
 
-void IntraSearch::xIntraCodingTUBlock(TransformUnit &tu, const ComponentID &compID, Distortion &dist,
-                                      const int &default0Save1Load2, uint32_t *numSig, std::vector<TrMode> *trModes,
-                                      const bool loadTr)
+void IntraSearch::xIntraCodingTUBlock(TransformUnit &tu, const ComponentID &compID, Distortion& ruiDist, const int &default0Save1Load2, uint32_t* numSig, std::vector<TrMode>* trModes, const bool loadTr)
 {
   if (!tu.blocks[compID].valid())
   {
@@ -3500,7 +3738,7 @@ void IntraSearch::xIntraCodingTUBlock(TransformUnit &tu, const ComponentID &comp
     if (tu.cu->ispMode && isLuma(compID) && CU::isISPLast(*tu.cu, area, area.compID) && CU::allLumaCBFsAreZero(*tu.cu))
     {
       // ISP has to have at least one non-zero CBF
-      dist = MAX_INT;
+      ruiDist = MAX_INT;
       return;
     }
     if ((m_pcEncCfg->getCostMode() == COST_LOSSLESS_CODING && slice.isLossless() && tu.mtsIdx[compID] == 0)
@@ -3577,7 +3815,7 @@ void IntraSearch::xIntraCodingTUBlock(TransformUnit &tu, const ComponentID &comp
       }
       if( tu.jointCbCr != codedCbfMask )
       {
-        dist = std::numeric_limits<Distortion>::max();
+        ruiDist = std::numeric_limits<Distortion>::max();
         return;
       }
       m_pcTrQuant->invTransformICT( tu, piResi, crResi );
@@ -3624,31 +3862,29 @@ void IntraSearch::xIntraCodingTUBlock(TransformUnit &tu, const ComponentID &comp
       PelBuf tmpRecLuma = m_tmpStorageLCU.getBuf(tmpArea1);
       tmpRecLuma.copyFrom(piReco);
       tmpRecLuma.rspSignal(m_pcReshape->getInvLUT());
-      dist += m_pcRdCost->getDistPart(piOrg, tmpRecLuma, sps.getBitDepth(toChannelType(compID)), compID, DF_SSE_WTD,
-                                      &orgLuma);
+      ruiDist += m_pcRdCost->getDistPart(piOrg, tmpRecLuma, sps.getBitDepth(toChannelType(compID)), compID, DF_SSE_WTD, &orgLuma);
     }
     else
     {
-      dist += m_pcRdCost->getDistPart(piOrg, piReco, bitDepth, compID, DF_SSE_WTD, &orgLuma);
+      ruiDist += m_pcRdCost->getDistPart(piOrg, piReco, bitDepth, compID, DF_SSE_WTD, &orgLuma);
       if( jointCbCr )
       {
-        dist += m_pcRdCost->getDistPart(crOrg, crReco, bitDepth, COMPONENT_Cr, DF_SSE_WTD, &orgLuma);
+        ruiDist += m_pcRdCost->getDistPart(crOrg, crReco, bitDepth, COMPONENT_Cr, DF_SSE_WTD, &orgLuma);
       }
     }
   }
   else
 #endif
   {
-    dist += m_pcRdCost->getDistPart(piOrg, piReco, bitDepth, compID, DF_SSE);
+    ruiDist += m_pcRdCost->getDistPart( piOrg, piReco, bitDepth, compID, DF_SSE );
     if( jointCbCr )
     {
-      dist += m_pcRdCost->getDistPart(crOrg, crReco, bitDepth, COMPONENT_Cr, DF_SSE);
+      ruiDist += m_pcRdCost->getDistPart( crOrg, crReco, bitDepth, COMPONENT_Cr, DF_SSE );
     }
   }
 }
 
-void IntraSearch::xIntraCodingACTTUBlock(TransformUnit &tu, const ComponentID &compID, Distortion &dist,
-                                         std::vector<TrMode> *trModes, const bool loadTr)
+void IntraSearch::xIntraCodingACTTUBlock(TransformUnit &tu, const ComponentID &compID, Distortion& ruiDist, std::vector<TrMode>* trModes, const bool loadTr)
 {
   if (!tu.blocks[compID].valid())
   {
@@ -3780,7 +4016,7 @@ void IntraSearch::xIntraCodingACTTUBlock(TransformUnit &tu, const ComponentID &c
       }
       if (tu.jointCbCr != codedCbfMask)
       {
-        dist = std::numeric_limits<Distortion>::max();
+        ruiDist = std::numeric_limits<Distortion>::max();
         if (m_pcEncCfg->getCostMode() != COST_LOSSLESS_CODING || !slice.isLossless())
         m_pcTrQuant->lambdaAdjustColorTrans(false);
         return;
@@ -3793,11 +4029,10 @@ void IntraSearch::xIntraCodingACTTUBlock(TransformUnit &tu, const ComponentID &c
   if (m_pcEncCfg->getCostMode() != COST_LOSSLESS_CODING || !slice.isLossless())
   m_pcTrQuant->lambdaAdjustColorTrans(false);
 
-  dist += m_pcRdCost->getDistPart(piOrgResi, piResi, sps.getBitDepth(toChannelType(compID)), compID, DF_SSE);
+  ruiDist += m_pcRdCost->getDistPart(piOrgResi, piResi, sps.getBitDepth(toChannelType(compID)), compID, DF_SSE);
   if (jointCbCr)
   {
-    dist +=
-      m_pcRdCost->getDistPart(crOrgResi, crResi, sps.getBitDepth(toChannelType(COMPONENT_Cr)), COMPONENT_Cr, DF_SSE);
+    ruiDist += m_pcRdCost->getDistPart(crOrgResi, crResi, sps.getBitDepth(toChannelType(COMPONENT_Cr)), COMPONENT_Cr, DF_SSE);
   }
 }
 
@@ -4547,7 +4782,7 @@ bool IntraSearch::xRecurIntraCodingACTQT(CodingStructure &cs, Partitioner &parti
     for (int modeIndex = firstCheckId; sps.getUseLFNST() || modeIndex < trModes.size(); modeIndex++)
     {
       const int modeId = sps.getUseLFNST() ? modeIndex : trModes[modeIndex].first;
-      if (modeId > lastCheckId)
+      if (modeId > (lossless ? (nNumTransformCands - 1) : lastCheckId))
       {
         break;
       }
@@ -6392,3 +6627,408 @@ void IntraSearch::xFinishISPModes()
   }
 }
 
+
+int IntraSearch::modelo_anna(double *feature) 
+{
+  /*
+This function was automatically generated using DecisionTreeToCpp Converter
+
+It takes feature vector as single argument:
+feature[0] - qp
+feature[1] - x
+feature[2] - y
+feature[3] - depth
+feature[4] - qt
+feature[5] - bt
+feature[6] - sadPlanar
+feature[7] - sadtPlanar
+feature[8] - fracPlanar
+feature[9] - rmdCostPlanar
+feature[10] - mrlDC
+feature[11] - sadDC
+feature[12] - sadtDC
+feature[13] - fracDC
+feature[14] - rmdCostDC
+feature[15] - mrlAng
+feature[16] - modoAngRMDList
+feature[17] - sadAng
+feature[18] - sadtAng
+feature[19] - fracAng
+feature[20] - rmdCostAng
+feature[21] - mipT
+feature[22] - modoMipRMDList
+feature[23] - sadMip
+feature[24] - sadtMip
+feature[25] - fracMip
+feature[26] - rmdCostMip
+feature[27] - posRdListPlanar
+feature[28] - posRdListDC
+feature[29] - posRdListAng
+feature[30] - modoAngRDList
+feature[31] - posRdListMip
+feature[32] - modoMipRDList
+feature[33] - largura
+feature[34] - altura
+
+
+It returns index of predicted class:
+0 - naoAngulares
+1 - Angulares
+2 - MIP
+
+
+Simply include this file to your project and use it
+*/
+
+	if (feature[31] <= 3.5) {
+		if (feature[28] <= 0.5) {
+			if (feature[29] <= 1.5) {
+				if (feature[30] <= 1.0) {
+							return 2;
+				}
+				else {
+					if (feature[26] <= 21.07) {
+						if (feature[5] <= 1.5) {
+							return 1;
+						}
+						else {
+								return 2;
+						}
+					}
+					else {
+						if (feature[16] <= 15.5) {
+							return 2;
+						}
+						else {
+							if (feature[17] <= 70.98) {
+									return 1;
+							}
+							else {
+								if (feature[13] <= 4009.46) {
+									return 1;
+								}
+								else {
+									if (feature[23] <= 74.31) {
+										return 2;
+									}
+									else {
+										return 1;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			else {
+				if (feature[27] <= 1.5) {
+					if (feature[18] <= 34.49) {
+						if (feature[31] <= 2.5) {
+							if (feature[23] <= 36.73) {
+									return 2;
+							}
+							else {
+								return 0;
+							}
+						}
+						else {
+							return 0;
+						}
+					}
+					else {
+						return 0;
+					}
+				}
+				else {
+					if (feature[24] <= 30.88) {
+						if (feature[23] <= 20.6) {
+							if (feature[0] <= 24.5) {
+								if (feature[2] <= 1148.0) {
+										return 2;
+								}
+								else {
+									return 0;
+								}
+							}
+							else {
+								return 2;
+							}
+						}
+						else {
+									return 2;
+						}
+					}
+					else {
+						if (feature[29] <= 3.5) {
+							if (feature[24] <= 61.54) {
+								if (feature[9] <= 68.99) {
+									if (feature[1] <= 2744.0) {
+											return 2;
+									}
+									else {
+										return 1;
+									}
+								}
+								else {
+									return 2;
+								}
+							}
+							else {
+								if (feature[17] <= 104.47) {
+									if (feature[1] <= 418.0) {
+										return 2;
+									}
+									else {
+										return 1;
+									}
+								}
+								else {
+										return 2;
+								}
+							}
+						}
+						else {
+							if (feature[25] <= 8702.56) {
+								if (feature[2] <= 1626.0) {
+												return 2;
+								}
+								else {
+									return 1;
+								}
+							}
+							else {
+								return 2;
+							}
+						}
+					}
+				}
+			}
+		}
+		else {
+			if (feature[31] <= 1.5) {
+				if (feature[24] <= 32.43) {
+					if (feature[13] <= 494.98) {
+						if (feature[28] <= 3.5) {
+							if (feature[2] <= 1028.0) {
+								return 2;
+							}
+							else {
+								return 0;
+							}
+						}
+						else {
+								return 2;
+						}
+					}
+					else {
+						if (feature[26] <= 14.43) {
+							if (feature[2] <= 1070.0) {
+								return 2;
+							}
+							else {
+								return 0;
+							}
+						}
+						else {
+							if (feature[2] <= 126.0) {
+									return 2;
+							}
+							else {
+								if (feature[0] <= 29.5) {
+									if (feature[34] <= 24.0) {
+										if (feature[33] <= 24.0) {
+												return 0;
+										}
+										else {
+											return 2;
+										}
+									}
+									else {
+										return 2;
+									}
+								}
+								else {
+									return 2;
+								}
+							}
+						}
+					}
+				}
+				else {
+					if (feature[2] <= 130.0) {
+						if (feature[24] <= 45.91) {
+							return 2;
+						}
+						else {
+							if (feature[1] <= 444.0) {
+								if (feature[13] <= 1717.55) {
+									return 0;
+								}
+								else {
+									return 2;
+								}
+							}
+							else {
+								return 0;
+							}
+						}
+					}
+					else {
+						if (feature[34] <= 24.0) {
+							if (feature[24] <= 53.06) {
+								if (feature[0] <= 34.5) {
+									return 0;
+								}
+								else {
+									if (feature[2] <= 294.0) {
+										return 2;
+									}
+									else {
+										return 0;
+									}
+								}
+							}
+							else {
+									return 0;
+							}
+						}
+						else {
+							return 0;
+						}
+					}
+				}
+			}
+			else {
+								return 0;
+			}
+		}
+	}
+	else {
+		if (feature[29] <= 1.5) {
+			if (feature[29] <= 0.5) {
+				return 0;
+			}
+			else {
+				if (feature[27] <= 4.0) {
+					if (feature[28] <= 1.0) {
+							return 1;
+					}
+					else {
+						return 0;
+					}
+				}
+				else {
+					if (feature[28] <= 1.0) {
+						if (feature[17] <= 96.7) {
+							if (feature[11] <= 102.53) {
+								if (feature[23] <= 29.24) {
+									if (feature[17] <= 18.35) {
+										if (feature[14] <= 16.1) {
+											if (feature[19] <= 968.8) {
+													return 1;
+											}
+											else {
+												if (feature[25] <= 1652.0) {
+													if (feature[2] <= 334.0) {
+														return 1;
+													}
+													else {
+														return 2;
+													}
+												}
+												else {
+														return 1;
+												}
+											}
+										}
+										else {
+											return 1;
+										}
+									}
+									else {
+										if (feature[24] <= 16.91) {
+											if (feature[23] <= 16.86) {
+												return 2;
+											}
+											else {
+														return 1;
+											}
+										}
+										else {
+												return 1;
+										}
+									}
+								}
+								else {
+														return 1;
+								}
+							}
+							else {
+												return 1;
+							}
+						}
+						else {
+										return 1;
+						}
+					}
+					else {
+						if (feature[2] <= 126.0) {
+							if (feature[28] <= 4.5) {
+								return 0;
+							}
+							else {
+									return 1;
+							}
+						}
+						else {
+							if (feature[28] <= 4.5) {
+									return 0;
+							}
+							else {
+								if (feature[19] <= 409.48) {
+									return 1;
+								}
+								else {
+									return 0;
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		else {
+			if (feature[13] <= 917.96) {
+						return 0;
+			}
+			else {
+				if (feature[27] <= 1.5) {
+					if (feature[28] <= 1.0) {
+						if (feature[6] <= 25.05) {
+							if (feature[0] <= 29.5) {
+								if (feature[1] <= 2356.0) {
+									return 0;
+								}
+								else {
+									return 1;
+								}
+							}
+							else {
+								return 0;
+							}
+						}
+						else {
+								return 0;
+						}
+					}
+					else {
+						return 0;
+					}
+				}
+				else {
+						return 0;
+				}
+			}
+		}
+	}
+}
